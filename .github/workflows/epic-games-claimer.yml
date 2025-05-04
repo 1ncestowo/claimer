@@ -45,4 +45,123 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install apprise
+          pip install apprise==1.8.0 # Фиксируем стабильную версию
+
+      - name: Install Xvfb, x11vnc, and cloudflared
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc jq
+          wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
+          chmod +x cloudflared
+
+      - name: Start VNC server
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x720x16 &
+          sleep 2
+          echo "Starting x11vnc with password ${{ secrets.VNC_PASSWORD }}"
+          x11vnc -display :99 -forever -shared -passwd ${{ secrets.VNC_PASSWORD }} -rfbport 5901 &
+          sleep 5 # Увеличиваем таймаут для стабильности
+          ps aux | grep x11vnc || true
+          netstat -tuln | grep 5901 || true
+
+      - name: Start cloudflared tunnel
+        run: |
+          ./cloudflared tunnel --url tcp://localhost:5901 > cloudflared.log 2>&1 &
+          sleep 15 # Увеличиваем таймаут для надежного старта
+          TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log || echo "")
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "Failed to get cloudflared URL"
+            cat cloudflared.log
+            exit 1
+          fi
+          TUNNEL_ADDRESS=$(echo "$TUNNEL_URL" | sed 's|https://||; s|\.trycloudflare\.com||')
+          echo "VNC URL: $TUNNEL_ADDRESS:5901" >> vnc_info.txt
+          echo "VNC Password: ${{ secrets.VNC_PASSWORD }}" >> vnc_info.txt
+
+      - name: Debug environment and files
+        env:
+          APPRISE_URL: ${{ secrets.TELEGRAM_APPRISE_URL }}
+          EG_EMAIL: ${{ secrets.EG_EMAIL }}
+        run: |
+          echo "Contents of vnc_info.txt:"
+          cat vnc_info.txt || echo "vnc_info.txt not found"
+          echo "APPRISE_URL: $APPRISE_URL"
+          echo "EG_EMAIL: $EG_EMAIL"
+          echo "Playwright version:"
+          npx playwright --version || echo "Playwright not installed"
+          echo "Node.js version:"
+          node --version
+          echo "Python version:"
+          python --version
+          echo "Apprise version:"
+          apprise --version || echo "Apprise not installed"
+          echo "Checking epic-games.js existence:"
+          ls -la epic-games.js || echo "epic-games.js not found"
+          echo "Current directory contents:"
+          ls -la
+
+      - name: Send Telegram notification (CAPTCHA needed)
+        env:
+          APPRISE_URL: ${{ secrets.TELEGRAM_APPRISE_URL }}
+        run: |
+          apprise -vv -t "Epic Games Claimer: CAPTCHA Needed" "$APPRISE_URL" < vnc_info.txt
+        if: success()
+
+      - name: Run Epic Games claimer
+        env:
+          EG_EMAIL: ${{ secrets.EG_EMAIL }}
+          EG_PASSWORD: ${{ secrets.EG_PASSWORD }}
+          EG_OTPKEY: ${{ secrets.EG_OTPKEY }}
+          NOTIFY: ${{ secrets.TELEGRAM_APPRISE_URL }}
+          NOTIFY_TITLE: 'Epic Games Claimer'
+        run: |
+          # Проверяем, существует ли скрипт
+          if [ ! -f "epic-games.js" ]; then
+            echo "Error: epic-games.js not found"
+            exit 1
+          fi
+          # Запускаем скрипт
+          node epic-games.js
+          # Сохраняем статус выполнения
+          EXIT_CODE=$?
+          # Выводим логи, если они есть
+          if [ -f "data/log.txt" ]; then
+            echo "Contents of data/log.txt:"
+            cat data/log.txt
+          else
+            echo "No log file found in data/log.txt"
+          fi
+          # Создаем временный файл для уведомления
+          echo "Epic Games Claimer Status:" > status.txt
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "Success: Games claimed successfully" >> status.txt
+          else
+            echo "Error: Script failed with exit code $EXIT_CODE" >> status.txt
+            echo "Check logs for details" >> status.txt
+          fi
+          exit $EXIT_CODE
+
+      - name: Send Telegram notification (Script status)
+        env:
+          APPRISE_URL: ${{ secrets.TELEGRAM_APPRISE_URL }}
+        run: |
+          apprise -vv -t "Epic Games Claimer: Script Result" "$APPRISE_URL" < status.txt
+        if: always() # Отправляем уведомление независимо от результата
+
+      - name: Cache data
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: ${{ runner.os }}-fgc-data-${{ github.run_id }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            data/
+            vnc_info.txt
+            cloudflared.log
+            status.txt
