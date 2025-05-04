@@ -97,4 +97,23 @@ jobs:
         env:
           EG_EMAIL: ${{ secrets.EG_EMAIL }}
           EG_PASSWORD: ${{ secrets.EG_PASSWORD }}
-          EG_OTPKEY: ${{ secrets.EG_OTPKEY
+          EG_OTPKEY: ${{ secrets.EG_OTPKEY }}
+          NOTIFY: ${{ secrets.TELEGRAM_APPRISE_URL }}
+          NOTIFY_TITLE: 'Epic Games Claimer'
+        run: node epic-games.js || true
+
+      - name: Cache data
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: ${{ runner.os }}-fgc-data-${{ github.run_id }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            data/
+            vnc_info.txt
+            cloudflared.log
