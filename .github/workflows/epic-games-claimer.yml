@@ -8,7 +8,7 @@ on:
 jobs:
   claim-epic-games:
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # Даем время на ручное прохождение CAPTCHA
+    timeout-minutes: 30 # Время для CAPTCHA
 
     steps:
       - name: Checkout repository
@@ -23,12 +23,16 @@ jobs:
         run: |
           npm install
           npx playwright install firefox --with-deps
+          npm install eslint --save-dev
 
-      - name: Install VNC and Xvfb
+      - name: Run ESLint to fix code
+        run: |
+          npx eslint epic-games.js src/util.js --fix || true
+
+      - name: Install Xvfb and x11vnc
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb tigervnc-standalone-server firefox
-          sudo apt-get install -y x11vnc
+          sudo apt-get install -y xvfb x11vnc jq
 
       - name: Set up ngrok
         run: |
@@ -42,14 +46,21 @@ jobs:
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x720x16 &
           sleep 2
-          vncserver :1 -geometry 1280x720 -depth 24 -passwd ${{ secrets.VNC_PASSWORD }}
-          x11vnc -display :99 -forever -shared -nopw &
+          echo "Starting x11vnc with password ${{ secrets.VNC_PASSWORD }}"
+          x11vnc -display :99 -forever -shared -passwd ${{ secrets.VNC_PASSWORD }} -rfbport 5901 &
+          sleep 2
+          ps aux | grep x11vnc || true
+          netstat -tuln | grep 5901 || true
 
       - name: Start ngrok tunnel
         run: |
           ./ngrok tcp 5901 > /dev/null &
           sleep 5
-          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_urlVice
+          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          if [ -z "$NGROK_URL" ]; then
+            echo "Failed to get ngrok URL"
+            exit 1
+          fi
           echo "VNC URL: $NGROK_URL" >> vnc_info.txt
           echo "VNC Password: ${{ secrets.VNC_PASSWORD }}" >> vnc_info.txt
 
@@ -66,7 +77,7 @@ jobs:
           EG_OTPKEY: ${{ secrets.EG_OTPKEY }}
           NOTIFY: ${{ secrets.TELEGRAM_APPRISE_URL }}
           NOTIFY_TITLE: 'Epic Games Claimer'
-        run: node epic-games.js || true # Игнорируем ошибку, если CAPTCHA требуется
+        run: node epic-games.js || true
 
       - name: Cache data
         uses: actions/cache@v4
